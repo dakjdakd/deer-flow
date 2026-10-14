@@ -4,6 +4,7 @@ import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID
 
 import httpx
@@ -15,6 +16,7 @@ from sqlalchemy import func, select
 from app.gateway.auth.models import User
 from app.gateway.auth_disabled import AUTH_SOURCE_SESSION
 from app.gateway.routers import scheduled_tasks
+from app.gateway.services import BusyThreadConflict, _validate_scope_thread_binding
 from app.scheduler.service import ScheduledTaskService
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
@@ -23,6 +25,7 @@ from deerflow.persistence.scheduled_task_runs import ScheduledTaskRunRepository
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
+from deerflow.persistence.thread_meta import ThreadMetaRepository
 from deerflow.runtime import ConflictError
 
 pytestmark = pytest.mark.asyncio
@@ -59,7 +62,8 @@ def _make_service(task_repo, run_repo, launch_run, *, queue_timeout_seconds: int
     )
 
 
-async def test_busy_reuse_thread_is_queued_then_launched_on_a_later_poll(tmp_path):
+@pytest.mark.parametrize("conflict_type", [ConflictError, BusyThreadConflict])
+async def test_busy_reuse_thread_is_queued_then_launched_on_a_later_poll(tmp_path, conflict_type):
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
     try:
         sf = get_session_factory()
@@ -74,7 +78,7 @@ async def test_busy_reuse_thread_is_queued_then_launched_on_a_later_poll(tmp_pat
             nonlocal attempts
             attempts += 1
             if attempts == 1:
-                raise ConflictError("Thread thread-1 already has an active run")
+                raise conflict_type("Thread thread-1 already has an active run")
             return {"run_id": "run-queued", "thread_id": kwargs["thread_id"]}
 
         service = _make_service(task_repo, run_repo, launch_run)
@@ -96,6 +100,59 @@ async def test_busy_reuse_thread_is_queued_then_launched_on_a_later_poll(tmp_pat
         assert attempts == 2
     finally:
         await close_engine()
+
+
+@pytest.mark.parametrize("trigger", ["manual", "scheduled"])
+async def test_permanent_thread_binding_conflict_fails_without_retry(sqlite_repos, trigger):
+    sf, task_repo, run_repo = sqlite_repos
+    now = datetime.now(UTC)
+    task = await _seed_reuse_task(task_repo, task_id="task-binding-conflict", now=now)
+    thread_store = ThreadMetaRepository(sf)
+    await thread_store.create("thread-1", assistant_id="different-agent")
+    await run_repo.create(
+        run_record_id="occurrence-binding-conflict",
+        task_id=task["id"],
+        thread_id="thread-1",
+        scheduled_for=now,
+        trigger=trigger,
+        status="queued",
+    )
+    attempts = 0
+
+    async def launch_run(**kwargs):
+        nonlocal attempts
+        attempts += 1
+        await _validate_scope_thread_binding(
+            SimpleNamespace(thread_store=thread_store),
+            thread_id=kwargs["thread_id"],
+            assistant_id=kwargs["assistant_id"],
+        )
+        raise AssertionError("a mismatched thread binding must reject launch")
+
+    service = _make_service(task_repo, run_repo, launch_run)
+    await service.run_once(now=now)
+
+    row = (await run_repo.list_by_task(task["id"]))[0]
+    expected_error = "409: Thread assistant does not match knowledge_scope assistant"
+    assert row["status"] == "failed"
+    assert row["error"] == expected_error
+    assert row["attempt_count"] == 1
+    assert row["run_id"] is None
+    assert row["finished_at"] is not None
+    assert await run_repo.get_active_run(task["id"]) is None
+    persisted_task = await task_repo.get(task["id"], user_id="user-1")
+    assert persisted_task is not None
+    assert persisted_task["last_error"] == expected_error
+    await scheduled_tasks._ensure_task_mutable(persisted_task, task_repo)
+
+    await service.run_once(now=now + timedelta(seconds=5))
+
+    assert attempts == 1
+    rows = await run_repo.list_by_task(task["id"])
+    assert len(rows) == 1
+    assert rows[0]["status"] == "failed"
+    assert rows[0]["error"] == expected_error
+    assert rows[0]["attempt_count"] == 1
 
 
 async def test_paused_task_manual_run_waits_for_busy_thread_and_stays_paused(tmp_path):
