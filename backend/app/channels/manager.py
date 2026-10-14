@@ -42,6 +42,7 @@ from app.channels.message_bus import (
     ResolvedAttachment,
 )
 from app.channels.run_policy import CHANNEL_RUN_POLICY, ChannelRunPolicy
+from app.channels.sandbox_files import sync_file_to_thread_sandbox
 from app.channels.store import ChannelStore
 from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, generate_csrf_token
 
@@ -58,6 +59,7 @@ from deerflow.runtime.goal import parse_goal_command
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY, make_origin
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 from deerflow.skills.slash import parse_slash_skill_reference
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.storage.skill_storage import SkillStorage
@@ -1360,6 +1362,8 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id:
     if not msg.files:
         return []
 
+    storage_user_id = user_id or get_effective_user_id()
+
     from deerflow.uploads.manager import (
         UnsafeUploadPathError,
         claim_unique_filename,
@@ -1371,13 +1375,15 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id:
     def _prepare_uploads_dir() -> tuple[Path, set[str]]:
         # Worker thread: ensure_uploads_dir's mkdir and the iterdir enumeration are
         # blocking filesystem IO that must stay off the event loop.
-        target = ensure_uploads_dir(thread_id, user_id=user_id)
+        target = ensure_uploads_dir(thread_id, user_id=storage_user_id)
         existing = {entry.name for entry in target.iterdir() if entry.is_file()}
         return target, existing
 
     uploads_dir, seen_names = await asyncio.to_thread(_prepare_uploads_dir)
 
     created: list[dict[str, Any]] = []
+    sandbox_provider = None
+    sync_failures = 0
     file_reader = INBOUND_FILE_READERS.get(msg.channel_name, _read_http_inbound_file)
     async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
         for idx, f in enumerate(msg.files):
@@ -1451,15 +1457,40 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id:
                 logger.exception("[Manager] failed to write inbound file: %s", dest)
                 continue
 
+            virtual_path = f"/mnt/user-data/uploads/{safe_name}"
+            try:
+                if sandbox_provider is None:
+                    sandbox_provider = await asyncio.to_thread(get_sandbox_provider)
+                synced = await sync_file_to_thread_sandbox(
+                    sandbox_provider,
+                    thread_id=thread_id,
+                    user_id=storage_user_id,
+                    virtual_path=virtual_path,
+                    content=data,
+                    owner_prefix="channel-upload",
+                    release_on_last=True,
+                )
+            except Exception as exc:
+                logger.warning("[Manager] failed to sync inbound file to sandbox: channel=%s, error=%s", msg.channel_name, _reader_error_summary(exc))
+                synced = False
+            if not synced:
+                # Keep the host copy for recovery, but never advertise a path
+                # that was not made available to the agent's environment.
+                sync_failures += 1
+                continue
+
             created.append(
                 {
                     "filename": safe_name,
                     "size": len(data),
-                    "path": f"/mnt/user-data/uploads/{safe_name}",
+                    "path": virtual_path,
                     "is_image": ftype == "image",
                 }
             )
 
+    if sync_failures:
+        notice = f"[Attachment upload failed: {sync_failures} file(s) could not be made available in the sandbox. Please resend the unavailable attachments.]"
+        msg.text = f"{msg.text}\n\n{notice}" if msg.text else notice
     return created
 
 

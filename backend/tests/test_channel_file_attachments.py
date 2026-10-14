@@ -6,6 +6,7 @@ import asyncio
 import os
 import stat
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -13,6 +14,13 @@ from support.symlinks import symlink_or_skip
 
 from app.channels.base import Channel
 from app.channels.message_bus import InboundMessage, MessageBus, OutboundMessage, ResolvedAttachment
+
+
+@pytest.fixture(autouse=True)
+def _mounted_ingestion_provider(monkeypatch):
+    # These existing tests exercise host publication. Remote-copy behavior has
+    # its own regression suite; do not require an operator's sandbox config.
+    monkeypatch.setattr("app.channels.manager.get_sandbox_provider", lambda: SimpleNamespace(uses_thread_data_mounts=True), raising=False)
 
 
 def _run(coro):

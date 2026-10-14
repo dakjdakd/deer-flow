@@ -943,6 +943,10 @@ Attachments saved by the shared IM ingestion pipeline or Feishu/DingTalk's
 embedded downloads keep distinct filenames, including when concurrent uploads
 choose the same name. The final filename is passed to the agent and used for
 sandbox sync; an existing conversation file is not overwritten.
+Shared ingestion copies each new attachment to non-mounted sandboxes before
+publishing its path, including reused conversations. If sandbox synchronization
+fails, the host copy is retained and the agent input reports the unavailable
+attachments rather than advertising missing paths.
 
 **Configuration in `config.yaml`:**
 
