@@ -280,8 +280,12 @@ redis:
     #    isolation only). Set a password to enable AUTH; the DSN becomes
     #    redis://:<password>@host:6379/0. Ignored if existingSecret is set.
     password: ""
-  # -- Use an existing Secret (key `redis-url`, plus `redis-password` if auth)
-  #    instead of generating one. Skips Secret creation.
+  # -- Use an existing Secret instead of generating one (required key
+  #    `redis-url`). In bundled mode, a nonempty optional `redis-password`
+  #    enables AUTH for the server and its probes; it must match the password
+  #    in `redis-url` (URL-encoded there). Missing/empty = no auth. The URL
+  #    must point at the bundled Service. `auth.password` is ignored.
+  #    With `enabled: false`, only `redis-url` is used for external Redis.
   existingSecret: ""
   primary:
     resources:

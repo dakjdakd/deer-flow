@@ -424,8 +424,15 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   auto-generated into a Secret (key `redis-url`) and injected as
   `DEER_FLOW_STREAM_BRIDGE_REDIS_URL`; `config.yaml` sets `stream_bridge.type:
   redis` by default. No-auth by default (ClusterIP isolation, matching compose);
-  set `redis.auth.password` to enable AUTH. For a managed Redis, disable the
-  bundled instance and point at it via `redis.external`. The gateway readiness
+  set `redis.auth.password` to enable AUTH. Alternatively, set
+  `redis.existingSecret` to a Secret holding `redis-url` and, for AUTH, a
+  nonempty `redis-password`. The bundled server and its probes read that raw
+  password; `redis-url` must point at the bundled Service and use the same
+  password, URL-encoded. A missing or empty `redis-password` keeps the server
+  in no-auth mode, and `redis.auth.password` is ignored with an existing
+  Secret. Restart Redis and Gateway Pods after changing these Secret values.
+  For a managed Redis, disable the bundled instance and point at it via
+  `redis.external`; external Secrets need only `redis-url`. The gateway readiness
   probe pings this Redis on every check and reports the pod unready while it
   is unreachable, since without the bridge no run can publish, stream or be
   cancelled from a peer pod.

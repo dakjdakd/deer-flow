@@ -1,5 +1,6 @@
 {{- if .Values.redis.enabled -}}
-{{- $password := .Values.redis.auth.password -}}
+{{- $userSecret := or .Values.redis.external.existingSecret .Values.redis.existingSecret -}}
+{{- $auth := or .Values.redis.auth.password $userSecret -}}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -43,7 +44,7 @@ spec:
           ports:
             - name: tcp-redis
               containerPort: 6379
-          {{- if $password }}
+          {{- if $auth }}
           # AUTH password is read at runtime so it never appears in the pod spec
           # args. `redis-server --requirepass` + `redis-cli -a` both read it
           # from this env.
@@ -53,16 +54,34 @@ spec:
                 secretKeyRef:
                   name: {{ include "deer-flow.redisUrlSecret" . }}
                   key: redis-password
+                  {{- if $userSecret }}
+                  # A user-managed Secret may intentionally contain only
+                  # `redis-url`; an absent password keeps bundled Redis in
+                  # no-auth mode instead of preventing the Pod from starting.
+                  optional: true
+                  {{- end }}
           {{- end }}
           command: ["sh", "-c"]
           args:
-            - exec redis-server --appendonly yes{{ if $password }} --requirepass "$REDIS_PASSWORD"{{ end }}
+            - |
+              {{- if $auth }}
+              if [ -n "${REDIS_PASSWORD:-}" ]; then
+                exec redis-server --appendonly yes --requirepass "$REDIS_PASSWORD"
+              fi
+              {{- end }}
+              exec redis-server --appendonly yes
           readinessProbe:
             exec:
               command:
                 - sh
                 - -c
-                - {{ if $password }}redis-cli --no-auth-warning -a "$REDIS_PASSWORD" ping{{ else }}redis-cli ping{{ end }}
+                - |
+                  {{- if $auth }}
+                  if [ -n "${REDIS_PASSWORD:-}" ]; then
+                    exec redis-cli --no-auth-warning -a "$REDIS_PASSWORD" ping
+                  fi
+                  {{- end }}
+                  exec redis-cli ping
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
@@ -70,7 +89,13 @@ spec:
               command:
                 - sh
                 - -c
-                - {{ if $password }}redis-cli --no-auth-warning -a "$REDIS_PASSWORD" ping{{ else }}redis-cli ping{{ end }}
+                - |
+                  {{- if $auth }}
+                  if [ -n "${REDIS_PASSWORD:-}" ]; then
+                    exec redis-cli --no-auth-warning -a "$REDIS_PASSWORD" ping
+                  fi
+                  {{- end }}
+                  exec redis-cli ping
             initialDelaySeconds: 30
             periodSeconds: 20
           {{- with .Values.redis.primary.resources }}

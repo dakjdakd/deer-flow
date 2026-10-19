@@ -10,6 +10,13 @@ ownership and capture cleanup. Retain the real XLSX conversion coverage.
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+`test_helm_redis_existing_secret.py` renders default, chart-managed password,
+user-managed Secret and external Redis configurations. Its POSIX-shell checks
+execute the rendered startup and both probe commands against argv-recording
+executables, including absent/empty passwords and shell-special characters.
+Keep the password optional only for user-managed Secrets; the Gateway URL and
+bundled Redis password must resolve to the same Secret.
+
 InfoQuest fetch log assertions install the real `UrlRedactionFilter` on the
 capture handler with fixture-scoped cleanup. Expect scheme/host context with
 redacted paths, so isolated runs and full-suite logging configuration agree;
