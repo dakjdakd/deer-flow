@@ -1,5 +1,7 @@
 ### MCP System (`packages/harness/deerflow/mcp/`)
 
+Pooled stdio and durable submit wrappers use `_with_mcp_runtime` to select an injected parameter name absent from the remote tool schema. Keep its concrete ToolRuntime annotation and introspectable signature when sync-wrapping; business fields named `runtime` (or the internal fallback name) must remain in the forwarded arguments. Regression: `tests/test_mcp_runtime_argument.py`. HTTP/SSE ordinary-tool adapter injection is upstream-owned.
+
 Inline `AudioContent` raises `NotImplementedError`, matching the adapter's unsupported-audio behavior. Never stringify its base64 payload into text; `ToolErrorHandlingMiddleware` reports a recoverable tool error. Coverage: `tests/test_mcp_audio_content.py`.
 
 Poll and cancel snapshot writes rejected by the ownership fence log the discard;

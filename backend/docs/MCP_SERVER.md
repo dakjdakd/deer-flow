@@ -675,10 +675,12 @@ def build_auth_interceptor():
 Read the run context from `request.runtime`, not from
 `langgraph.config.get_config()`. The context is carried on the LangGraph
 runtime, not on the `RunnableConfig` propagated to child runnables, so
-`get_config().get("context")` is `None` inside a tool call. LangGraph's tool
-node injects the runtime into any tool parameter named `runtime`, which is how
-both the pooled stdio wrapper and `langchain-mcp-adapters`' HTTP/SSE tool
-receive it. When the call originates outside a tool node, fall back to
+`get_config().get("context")` is `None` inside a tool call. DeerFlow's pooled
+stdio and durable background-submit wrappers expose a ToolRuntime-typed
+injection parameter whose name is absent from the remote schema, preserving
+business arguments such as `runtime`. Their sync wrappers retain the same
+annotation and signature. Ordinary HTTP/SSE tools use
+`langchain-mcp-adapters`' own runtime injection. When the call originates outside a tool node, fall back to
 `langgraph.runtime.get_runtime()` (see
 `deerflow/mcp/context_headers.py::_current_runtime`).
 

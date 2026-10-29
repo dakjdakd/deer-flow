@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import re
 from collections.abc import Callable, Collection, Iterable, Mapping
@@ -642,6 +643,32 @@ def _resolve_session_init_timeout(server_cfg: Any) -> float | None:
     return float(value)
 
 
+def _with_mcp_runtime(tool: BaseTool, coroutine: Callable[..., Any]) -> Callable[..., Any]:
+    """Keep injected ToolRuntime separate from the remote JSON-schema fields."""
+    properties = tool.args
+    runtime_argument = "runtime"
+    if runtime_argument in properties:
+        runtime_argument = "_deerflow_tool_runtime"
+        while runtime_argument in properties:
+            runtime_argument += "_"
+
+    async def call_with_runtime(**arguments: Any) -> Any:
+        runtime = arguments.pop(runtime_argument, None)
+        return await coroutine(runtime, **arguments)
+
+    # ToolNode reads type hints, while the sync wrapper follows __signature__.
+    # Use the actual ToolRuntime type rather than relying on the name "runtime".
+    call_with_runtime.__annotations__ = {runtime_argument: Runtime | None, "return": Any}
+    call_with_runtime.__signature__ = inspect.Signature(  # type: ignore[attr-defined]
+        [
+            inspect.Parameter(runtime_argument, inspect.Parameter.KEYWORD_ONLY, default=None, annotation=Runtime | None),
+            inspect.Parameter("arguments", inspect.Parameter.VAR_KEYWORD, annotation=Any),
+        ],
+        return_annotation=Any,
+    )
+    return call_with_runtime
+
+
 def _make_session_pool_tool(
     tool: BaseTool,
     server_name: str,
@@ -684,6 +711,7 @@ def _make_session_pool_tool(
 
     async def call_with_persistent_session(
         runtime: Runtime | None = None,
+        /,
         **arguments: Any,
     ) -> Any:
         thread_id = _extract_thread_id(runtime)
@@ -846,7 +874,7 @@ def _make_session_pool_tool(
         name=tool.name,
         description=tool.description,
         args_schema=tool.args_schema,
-        coroutine=call_with_persistent_session,
+        coroutine=_with_mcp_runtime(tool, call_with_persistent_session),
         response_format="content_and_artifact",
         metadata=tool.metadata,
     )
@@ -878,6 +906,7 @@ def _make_background_submit_tool(
 
     async def submit_in_background(
         runtime: Runtime | None = None,
+        /,
         **arguments: Any,
     ) -> dict[str, Any]:
         submitter = get_mcp_task_submitter()
@@ -917,7 +946,7 @@ def _make_background_submit_tool(
         name=tool.name,
         description=(f"{tool.description}\n\n{background_contract}" if tool.description else background_contract),
         args_schema=tool.args_schema,
-        coroutine=submit_in_background,
+        coroutine=_with_mcp_runtime(tool, submit_in_background),
         metadata=tool.metadata,
     )
 
